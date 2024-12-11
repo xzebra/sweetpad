@@ -146,97 +146,103 @@ async function getBuildSettingsBase(options: {
   sdk: string | undefined;
   xcworkspace: string;
 }): Promise<XcodeBuildSettings | null> {
-  // Get project name from the path to use as default scheme
-  const projectName = path.basename(options.xcworkspace.replace(/\.xcodeproj.*$/, ""));
-  const effectiveScheme = options.scheme === "Model" ? projectName : options.scheme;
-  
   const derivedDataPath = prepareDerivedDataPath();
+
+  // Get project name from the path as fallback scheme
+  const projectName = path.basename(options.xcworkspace.replace(/\.xcodeproj.*$/, ""));
 
   // Determine if we're dealing with a workspace or project
   const isWorkspace = options.xcworkspace.endsWith(".xcworkspace");
   const projectOrWorkspacePath = isWorkspace ? options.xcworkspace : options.xcworkspace.replace(/\/project\.xcworkspace$/, "");
   const buildFlag = isWorkspace ? "-workspace" : "-project";
 
-  const args = [
-    "-showBuildSettings",
-    "-scheme",
-    effectiveScheme,
-    buildFlag,
-    projectOrWorkspacePath,
-    "-configuration",
-    options.configuration,
-    ...(derivedDataPath ? ["-derivedDataPath", derivedDataPath] : []),
-    "-json",
-  ];
+  // Try with provided scheme first, then fall back to project name if no build settings found
+  const schemesToTry = [options.scheme, projectName];
 
-  if (options.sdk !== undefined) {
-    args.push("-sdk", options.sdk);
-  }
+  for (const currentScheme of schemesToTry) {
+    const args = [
+      "-showBuildSettings",
+      "-scheme",
+      currentScheme,
+      buildFlag,
+      projectOrWorkspacePath,
+      "-configuration",
+      options.configuration,
+      ...(derivedDataPath ? ["-derivedDataPath", derivedDataPath] : []),
+      "-json",
+    ];
 
-  // Add debug destination for Swift Package builds
-  args.push("-destination", "generic/platform=iOS");
-
-  try {
-    let output = await exec({
-      command: "xcodebuild",
-      args: args,
-    });
-
-    if (!output || output.trim() === "") {
-      // If first attempt fails, try with -workspace instead of -project
-      const workspaceArgs = [...args];
-      workspaceArgs[3] = "-workspace"; // Replace -project with -workspace
-
-      const workspaceOutput = await exec({
-        command: "xcodebuild",
-        args: workspaceArgs,
-      });
-
-      if (workspaceOutput && workspaceOutput.trim() !== "") {
-        output = workspaceOutput;
-      } else {
-        return null;
-      }
+    if (options.sdk !== undefined) {
+      args.push("-sdk", options.sdk);
     }
 
-    // First few lines can be invalid json, so we need to skip them, until we find "{" or "[" at the beginning of the line
-    const lines = output.split("\n");
-    let jsonStartLine = -1;
-    let nonJsonLines: string[] = [];
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      
-      if (!line.startsWith("{") && !line.startsWith("[")) {
-        nonJsonLines.push(line);
-      }
-
-      if (line.startsWith("{") || line.startsWith("[")) {
-        jsonStartLine = i;
-        break;
-      }
-    }
-
-    if (jsonStartLine === -1) {
-      return null;
-    }
+    // Add debug destination for Swift Package builds
+    args.push("-destination", "generic/platform=iOS");
 
     try {
-      const jsonData = lines.slice(jsonStartLine).join("\n");
-      const output = JSON.parse(jsonData) as BuildSettingsOutput;
-      
-      if (!output || output.length === 0) {
-        return null;
+      let output = await exec({
+        command: "xcodebuild",
+        args: args,
+      });
+
+      if (!output || output.trim() === "") {
+        // If first attempt fails, try with -workspace instead of -project
+        const workspaceArgs = [...args];
+        workspaceArgs[3] = "-workspace"; // Replace -project with -workspace
+
+        const workspaceOutput = await exec({
+          command: "xcodebuild",
+          args: workspaceArgs,
+        });
+
+        if (workspaceOutput && workspaceOutput.trim() !== "") {
+          output = workspaceOutput;
+        } else {
+          continue; // Try next scheme
+        }
       }
 
-      return new XcodeBuildSettings(output);
+      // Parse JSON output
+      const lines = output.split("\n");
+      let jsonStartLine = -1;
+      let nonJsonLines: string[] = [];
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        
+        if (!line.startsWith("{") && !line.startsWith("[")) {
+          nonJsonLines.push(line);
+        }
+
+        if (line.startsWith("{") || line.startsWith("[")) {
+          jsonStartLine = i;
+          break;
+        }
+      }
+
+      if (jsonStartLine === -1) {
+        continue; // Try next scheme
+      }
+
+      try {
+        const jsonData = lines.slice(jsonStartLine).join("\n");
+        const parsedOutput = JSON.parse(jsonData) as BuildSettingsOutput;
+        
+        if (!parsedOutput || parsedOutput.length === 0) {
+          continue; // Try next scheme
+        }
+
+        return new XcodeBuildSettings(parsedOutput);
+      } catch (e) {
+        continue; // Try next scheme
+      }
     } catch (e) {
-      return null;
+      continue; // Try next scheme
     }
-  } catch (e) {
-    return null;
   }
+
+  return null; // No schemes worked
 }
 
 export async function getOptionalBuildSettings(options: {
