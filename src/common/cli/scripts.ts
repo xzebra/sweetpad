@@ -146,14 +146,36 @@ async function getBuildSettingsBase(options: {
   sdk: string | undefined;
   xcworkspace: string;
 }): Promise<XcodeBuildSettings | null> {
+  // Get project name from the path to use as default scheme
+  const projectName = path.basename(options.xcworkspace.replace(/\.xcodeproj.*$/, ""));
+  const effectiveScheme = options.scheme === "Model" ? projectName : options.scheme;
+
+  // Check if scheme exists first
+  const schemes = await getSchemes({ xcworkspace: options.xcworkspace });
+  const schemeExists = schemes.some(scheme => scheme.name === effectiveScheme);
+  
+  if (!schemeExists) {
+    commonLogger.error("Scheme not found", {
+      error: new Error("Invalid scheme"),
+      scheme: effectiveScheme,
+      availableSchemes: schemes.map(s => s.name)
+    });
+    return null;
+  }
+
   const derivedDataPath = prepareDerivedDataPath();
+
+  // Determine if we're dealing with a workspace or project
+  const isWorkspace = options.xcworkspace.endsWith(".xcworkspace");
+  const projectOrWorkspacePath = isWorkspace ? options.xcworkspace : options.xcworkspace.replace(/\/project\.xcworkspace$/, "");
+  const buildFlag = isWorkspace ? "-workspace" : "-project";
 
   const args = [
     "-showBuildSettings",
     "-scheme",
-    options.scheme,
-    "-workspace",
-    options.xcworkspace,
+    effectiveScheme,
+    buildFlag,
+    projectOrWorkspacePath,
     "-configuration",
     options.configuration,
     ...(derivedDataPath ? ["-derivedDataPath", derivedDataPath] : []),
@@ -164,33 +186,122 @@ async function getBuildSettingsBase(options: {
     args.push("-sdk", options.sdk);
   }
 
-  const stdout = await exec({
-    command: "xcodebuild",
-    args: args,
+  // Add debug destination for Swift Package builds
+  args.push("-destination", "generic/platform=iOS");
+
+  const fullCommand = `xcodebuild ${args.join(" ")}`;
+  commonLogger.error("Executing command", {
+    error: new Error("Command start"),
+    command: fullCommand
   });
 
-  // First few lines can be invalid json, so we need to skip them, untill we find "{" or "[" at the beginning of the line
-  const lines = stdout.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) {
-      commonLogger.warn("Empty line in build settings output", {
-        stdout: stdout,
-        index: i,
-      });
-      continue;
-    }
+  try {
+    let output = await exec({
+      command: "xcodebuild",
+      args: args,
+    });
 
-    if (line.startsWith("{") || line.startsWith("[")) {
-      const data = lines.slice(i).join("\n");
-      const output = JSON.parse(data) as BuildSettingsOutput;
-      if (output.length === 0) {
+    commonLogger.error("xcodebuild output", {
+      error: new Error("Command output"),
+      output: output,
+      command: fullCommand
+    });
+
+    if (!output || output.trim() === "") {
+      // If first attempt fails, try with -workspace instead of -project
+      const workspaceArgs = [...args];
+      workspaceArgs[3] = "-workspace"; // Replace -project with -workspace
+
+      const workspaceOutput = await exec({
+        command: "xcodebuild",
+        args: workspaceArgs,
+      });
+
+      if (workspaceOutput && workspaceOutput.trim() !== "") {
+        commonLogger.error("Workspace command succeeded", {
+          error: new Error("Workspace output"),
+          output: workspaceOutput
+        });
+        output = workspaceOutput;
+      } else {
+        commonLogger.error("Both project and workspace attempts failed", {
+          error: new Error("No output"),
+          command: fullCommand
+        });
         return null;
       }
-      return new XcodeBuildSettings(output);
     }
+
+    // First few lines can be invalid json, so we need to skip them, until we find "{" or "[" at the beginning of the line
+    const lines = output.split("\n");
+    let jsonStartLine = -1;
+    let nonJsonLines: string[] = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      if (!line.startsWith("{") && !line.startsWith("[")) {
+        nonJsonLines.push(line);
+      }
+
+      if (line.startsWith("{") || line.startsWith("[")) {
+        jsonStartLine = i;
+        break;
+      }
+    }
+
+    commonLogger.error("Build output analysis", {
+      error: new Error("Output analysis"),
+      nonJsonLines: nonJsonLines,
+      jsonStartLine: jsonStartLine,
+      totalLines: lines.length
+    });
+
+    if (jsonStartLine === -1) {
+      commonLogger.error("No JSON in output", {
+        error: new Error("JSON not found"),
+        command: fullCommand,
+        nonJsonLines: nonJsonLines
+      });
+      return null;
+    }
+
+    try {
+      const jsonData = lines.slice(jsonStartLine).join("\n");
+      const output = JSON.parse(jsonData) as BuildSettingsOutput;
+      
+      if (!output || output.length === 0) {
+        commonLogger.error("Empty build settings", {
+          error: new Error("No settings in JSON"),
+          command: fullCommand,
+          jsonData: jsonData
+        });
+        return null;
+      }
+
+      commonLogger.error("Build settings found", {
+        error: new Error("Settings parsed"),
+        settingsCount: output.length,
+        firstSetting: output[0]
+      });
+
+      return new XcodeBuildSettings(output);
+    } catch (e) {
+      commonLogger.error("JSON parse failed", {
+        error: e,
+        jsonStartLine: jsonStartLine,
+        partialOutput: lines.slice(jsonStartLine, jsonStartLine + 5).join("\n")
+      });
+      return null;
+    }
+  } catch (e) {
+    commonLogger.error("Command execution failed", {
+      error: e,
+      command: fullCommand
+    });
+    return null;
   }
-  return null;
 }
 
 export async function getOptionalBuildSettings(options: {
@@ -200,10 +311,25 @@ export async function getOptionalBuildSettings(options: {
   xcworkspace: string;
 }): Promise<XcodeBuildSettings | null> {
   try {
-    return await getBuildSettingsBase(options);
+    commonLogger.error("Getting build settings", {
+      error: new Error("Build settings request"),
+      options: options
+    });
+
+    const settings = await getBuildSettingsBase(options);
+    
+    if (!settings) {
+      commonLogger.error("No settings returned", {
+        error: new Error("Settings not found"),
+        options: options
+      });
+    }
+    
+    return settings;
   } catch (e) {
-    commonLogger.error("Error getting build settings", {
+    commonLogger.error("Build settings error", {
       error: e,
+      options: options
     });
     return null;
   }
@@ -220,6 +346,10 @@ export async function getBuildSettings(options: {
 }): Promise<XcodeBuildSettings> {
   const settings = await getOptionalBuildSettings(options);
   if (!settings) {
+    commonLogger.error("Build settings failed", {
+      error: new Error("No settings available"),
+      options: options
+    });
     throw new ExtensionError("Empty build settings");
   }
   return settings;

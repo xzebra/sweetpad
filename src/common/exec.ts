@@ -1,71 +1,45 @@
-import { getWorkspacePath } from "../build/utils";
-import { ExecBaseError, ExecErrror } from "./errors";
+import { exec as execCallback } from "child_process";
+import { promisify } from "util";
 import { commonLogger } from "./logger";
 
-import { execa } from "execa";
+const execPromise = promisify(execCallback);
 
-type ExecaError = {
+export async function exec(options: {
   command: string;
-  escapedCommand: string;
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  failed: boolean;
-  timedOut: boolean;
-  killed: boolean;
-  signal?: string;
-  signalDescription?: string;
-  cwd: string;
-  message: string;
-  shortMessage: string;
-  originalMessage: string;
-};
-
-export async function exec(options: { command: string; args: string[]; cwd?: string }): Promise<string> {
-  const cwd = options.cwd ?? getWorkspacePath();
-
-  commonLogger.debug("Executing command", {
-    command: options.command,
-    args: options.args,
-    cwd: cwd,
-  });
-
-  let result: any;
+  args: string[];
+}): Promise<string> {
+  const command = `${options.command} ${options.args.join(" ")}`;
+  
   try {
-    result = await execa(options.command, options.args, {
-      cwd: cwd,
+    commonLogger.error("Executing command", {
+      error: new Error("Command execution"),
+      command: command
     });
-  } catch (e: any) {
-    const errorMessage: string = e?.shortMessage ?? e?.message ?? "[unknown error]";
-    const stderr: string | undefined = e?.stderr;
-    // todo: imrove logging
-    throw new ExecBaseError(`Error executing "${options.command}" command`, {
-      errorMessage: errorMessage,
-      stderr: stderr,
-      command: options.command,
-      args: options.args,
-      cwd: cwd,
+
+    const { stdout, stderr } = await execPromise(command);
+    
+    if (stderr) {
+      commonLogger.error("Command stderr", {
+        error: new Error("Command error output"),
+        stderr: stderr,
+        command: command
+      });
+    }
+
+    commonLogger.error("Command stdout", {
+      error: new Error("Command output"),
+      stdout: stdout,
+      command: command
     });
+
+    return stdout;
+  } catch (error: any) {
+    commonLogger.error("Command execution failed", {
+      error: error,
+      stderr: error.stderr,
+      stdout: error.stdout,
+      command: command
+    });
+    throw error;
   }
-
-  commonLogger.debug("Command executed", {
-    command: options.command,
-    args: options.args,
-    cwd: cwd,
-    stdout: result.stdout,
-    stderr: result.stderr,
-  });
-
-  // check error code
-  if (result.stderr && !result.stdout) {
-    throw new ExecErrror(`Error executing "${options.command}" command`, {
-      stderr: result.stderr,
-      command: options.command,
-      args: options.args,
-      cwd: cwd,
-      errorMessage: "[stderr not empty]",
-    });
-  }
-
-  return result.stdout;
 }
