@@ -149,20 +149,7 @@ async function getBuildSettingsBase(options: {
   // Get project name from the path to use as default scheme
   const projectName = path.basename(options.xcworkspace.replace(/\.xcodeproj.*$/, ""));
   const effectiveScheme = options.scheme === "Model" ? projectName : options.scheme;
-
-  // Check if scheme exists first
-  const schemes = await getSchemes({ xcworkspace: options.xcworkspace });
-  const schemeExists = schemes.some(scheme => scheme.name === effectiveScheme);
   
-  if (!schemeExists) {
-    commonLogger.error("Scheme not found", {
-      error: new Error("Invalid scheme"),
-      scheme: effectiveScheme,
-      availableSchemes: schemes.map(s => s.name)
-    });
-    return null;
-  }
-
   const derivedDataPath = prepareDerivedDataPath();
 
   // Determine if we're dealing with a workspace or project
@@ -189,22 +176,10 @@ async function getBuildSettingsBase(options: {
   // Add debug destination for Swift Package builds
   args.push("-destination", "generic/platform=iOS");
 
-  const fullCommand = `xcodebuild ${args.join(" ")}`;
-  commonLogger.error("Executing command", {
-    error: new Error("Command start"),
-    command: fullCommand
-  });
-
   try {
     let output = await exec({
       command: "xcodebuild",
       args: args,
-    });
-
-    commonLogger.error("xcodebuild output", {
-      error: new Error("Command output"),
-      output: output,
-      command: fullCommand
     });
 
     if (!output || output.trim() === "") {
@@ -218,16 +193,8 @@ async function getBuildSettingsBase(options: {
       });
 
       if (workspaceOutput && workspaceOutput.trim() !== "") {
-        commonLogger.error("Workspace command succeeded", {
-          error: new Error("Workspace output"),
-          output: workspaceOutput
-        });
         output = workspaceOutput;
       } else {
-        commonLogger.error("Both project and workspace attempts failed", {
-          error: new Error("No output"),
-          command: fullCommand
-        });
         return null;
       }
     }
@@ -251,19 +218,7 @@ async function getBuildSettingsBase(options: {
       }
     }
 
-    commonLogger.error("Build output analysis", {
-      error: new Error("Output analysis"),
-      nonJsonLines: nonJsonLines,
-      jsonStartLine: jsonStartLine,
-      totalLines: lines.length
-    });
-
     if (jsonStartLine === -1) {
-      commonLogger.error("No JSON in output", {
-        error: new Error("JSON not found"),
-        command: fullCommand,
-        nonJsonLines: nonJsonLines
-      });
       return null;
     }
 
@@ -272,34 +227,14 @@ async function getBuildSettingsBase(options: {
       const output = JSON.parse(jsonData) as BuildSettingsOutput;
       
       if (!output || output.length === 0) {
-        commonLogger.error("Empty build settings", {
-          error: new Error("No settings in JSON"),
-          command: fullCommand,
-          jsonData: jsonData
-        });
         return null;
       }
 
-      commonLogger.error("Build settings found", {
-        error: new Error("Settings parsed"),
-        settingsCount: output.length,
-        firstSetting: output[0]
-      });
-
       return new XcodeBuildSettings(output);
     } catch (e) {
-      commonLogger.error("JSON parse failed", {
-        error: e,
-        jsonStartLine: jsonStartLine,
-        partialOutput: lines.slice(jsonStartLine, jsonStartLine + 5).join("\n")
-      });
       return null;
     }
   } catch (e) {
-    commonLogger.error("Command execution failed", {
-      error: e,
-      command: fullCommand
-    });
     return null;
   }
 }
